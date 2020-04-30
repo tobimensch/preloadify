@@ -6,6 +6,17 @@ It was lurking around on my computer for years, because I never thought it was q
 and therefore never got around to releasing it. In truth it worked the whole time for the current
 set of features, and I wanted to add some more before releasing it.
 
+This script can be a great alternative to static compilation, or to cases where you have a
+dynamically linked binary, that you'd like to port to other systems, but you aren't willing
+to compile from source, or for some reason can't. To make this work preloadify uses LD_PRELOAD,
+a unpacking/run script at the beginning of the created binary, tar, optional compression,
+and patchelf.
+
+Dependencies:
+- docopt (pip3 install docopt)
+- patchelf
+- tar
+
 The help output (preloadify --help) should be sufficient to understand how it works:
 ```
 Usage: preloadify [options] EXECUTABLE OUTPUTFILE
