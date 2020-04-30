@@ -1,0 +1,6 @@
+- name: Deploy Pypi
+  uses: remorses/pypi@v3
+    with:
+      setupfile: ./setup.py
+      username: ${{ secrets.pypi_username }}
+      password: ${{ secrets.pypi_password }}
