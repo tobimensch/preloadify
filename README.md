@@ -12,6 +12,10 @@ to compile from source, or for some reason can't. To make this work preloadify u
 a unpacking/run script at the beginning of the created binary, tar, optional compression,
 and patchelf.
 
+Preloadify goes so far as to include the ld.so in the created binary (which is a sort of
+self-contained package) in order to make absolutely sure that it will run on every Linux
+system with compatible processor architecture, in example all 64bit-x86 Linux systems.
+
 Dependencies:
 - docopt (pip3 install docopt)
 - patchelf
