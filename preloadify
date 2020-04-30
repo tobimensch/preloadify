@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+# Preloadify is MIT licensed.
+# Please see https://opensource.org/licenses/MIT
+# for more information on that license.
+# Please be a good open source citizen and contribute
+# changes back to https://github.com/tobimensch/preloadify
+
 #1.
 #ldd on main executable
 #recurvise ldd on all libraries
