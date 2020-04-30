@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+
+#1.
+#ldd on main executable
+#recurvise ldd on all libraries
+#save table/list of all required libraries
+
+#2. copy all required libraries into folder lib/
+
+#3. create tarball with:
+#- original main executable (unchanged)
+# - (use patchelf to change interpreter location)
+#- lib/ folder with all dependencies
+
+#4. create wrapper shell script that
+#- contains script portion
+#- contains tarball portion
+#- is executable
+#- script portion finds tarball portion, extracts it and calls the executable
+#- script portion cleans up temporary execution environment (ie. removes tmp files) when
+#  executable returns
+
+import subprocess
+import os
+
+#simplify subprocess.call
+def shell(s,suppress_output=False):
+    if suppress_output:
+        FNULL = open(os.devnull, 'w')
+        subprocess.call(s, stderr=FNULL, shell=True)
+    else:
+        subprocess.call(s, shell=True)
+
+def shell_output(command):
+    return subprocess.check_output(command, stderr=subprocess.STDOUT, shell=True).decode('utf-8').strip()
+
+from docopt import docopt
+
+__all__ = ['preloadify']
+__version__ = '0.1.0'
+
+doc ='''
+Usage: preloadify [options] EXECUTABLE OUTPUTFILE
+
+Create an executable self-containing all dynamic library depedencies of the original.
+
+Options:
+  -l, --list                  Alphabetically sorted list of all dynamic libraries
+                              that are included in the preloadified executable.
+  -s, --size                  Lists the size of all dynamic libraries included in the
+                              preloadified executable sorted by size.
+  -b, --blacklist FILE        Using a blacklist you can exclude dynamic libraries
+                              from being included in the preloadified executable.
+                              Blacklist files have the following format:
+                                  libsomelib
+                                  libsomeotherlib
+  -a, --addlist FILE          Include libraries and their respective dependencies
+                              from a list in preloadified executable.
+                              These usually are libraries that get dynamically
+                              linked at runtime.
+                              Addlist files have the following format:
+                                  libsomelib
+                                  libsomeotherlib
+                                  /path/to/lib
+  -c, --compression METHOD    One of gzip, bzip2 and xz.
+                              By default compression is disabled.
+                              Note that compression can influence portability negatively.
+  -t, --tmpdir TMPDIR         Set a different tmp directory. Default is /tmp.
+  -r, --run                   Run preloadified executable as soon as it is created.
+                              (For testing purposes)
+  --chrootify                 With this option the wrapper creates a chroot environment
+                              for the executable emulating the system without its libraries.
+                              This can be useful to test whether all library dependencies
+                              have been taken care of through preloadifying.
+  --pack EXECUTABLES          List of additional executables that should be part of the
+                              preloadified executable separated by comma.
+                              i.e. --pack bash,/path/to/program
+                              Note that only the main executable will be executed
+                              when executing the generated outputfile.
+  -h, --help                  Show this help message and exit
+  -v, --version               Display version information
+
+'''
+
+opt = docopt(doc,None,True,__version__)
+
+path_to_original = ""
+path_to_output = ""
+alphabetic_list = False
+size_list = False
+blacklist = None
+compression = None
+run = False
+addlist = None
+chrootify = False
+pack = None
+tmpdir = "/tmp"
+
+if opt["EXECUTABLE"]:
+    path_to_original = opt["EXECUTABLE"]
+if opt["OUTPUTFILE"]:
+    path_to_output = opt["OUTPUTFILE"]
+if opt["--list"]:
+    alphabetic_list = True
+if opt["--size"]:
+    size_list = True
+if opt["--run"]:
+    run = True
+if opt["--compression"]:
+    compression = opt["--compression"]
+if opt["--blacklist"]:
+    f = open(opt["--blacklist"],'r')
+    blacklist = []
+    tmp = f.readlines()
+    for line in tmp:
+        blacklist.append(line.strip())
+    f.close()
+if opt["--addlist"]:
+    f = open(opt["--addlist"],'r')
+    addlist = []
+    tmp = f.readlines()
+    for line in tmp:
+        addlist.append(line.strip())
+    f.close()
+if opt["--chrootify"]:
+    chrootify = True
+if opt["--tmpdir"]:
+    tmpdir = opt["--tmpdir"]
+
+pack = []
+if opt["--pack"]:
+    tmp = opt["--pack"].split(",")
+    for item in tmp:
+        item.strip()
+        if os.path.isfile(item):
+            pack.append(item)
+        else:
+            out = shell_output("whereis "+item+" | sed 's/.*:$//' | sed 's/.*:\s//' | sed 's/\s.*//'")
+            if out.strip() != "":
+                if os.path.isfile(out):
+                    pack.append(out)
+
+#dictionary with all depedencies in the form { "libname.so" : "/path/to/lib/libname.so" , ... }
+depdict = {} 
+#dictionary of all depedencies we are already satisfying in the form { "libname.so" : True/False }
+depdone = {}
+#do we have all dependencies?
+alldone = False
+
+def add(libname,libpath):
+    depdict[libname] = libpath
+    if libname not in depdone:
+        depdone[libname] = False
+        alldone = False
+
+
+def ldd_run(filename,ret=True):
+    p = subprocess.Popen(["ldd",filename], stdout=subprocess.PIPE)
+    out, err = p.communicate()
+    if p.returncode != 0:
+        print(err)
+        print("something went wrong")
+        return ''
+    else:
+        if ret:
+            for line in out.decode('utf-8').split("\n"):
+                line = line.strip()
+                line = line[:line.find("(")].strip()
+                libname, *rest = line.split("=>")
+                libname = libname.strip()
+                liblocation = None
+
+                if len(rest) > 0:
+                    if blacklist:
+                        blacklisted = False
+                        for item in blacklist:
+                            if libname.find(item) == 0:
+                                blacklisted = True
+                                break
+                        if blacklisted:
+                            continue
+
+                    liblocation = rest[0].strip()
+                    add(libname,liblocation)
+                elif libname.startswith("/") and os.path.isfile(libname):
+                    liblocation = libname
+                    add(libname,liblocation)
+            return out
+        elif out != '':
+            print(out.rstrip())
+
+pack.append(path_to_original)
+
+if pack:
+    for item in pack:
+        ldd_run(item)
+
+if addlist:
+    alllibs = {}
+
+    out = shell_output("ldconfig -p | tail -n +2 ")
+    for line in out.split("\n"):
+        line = line.strip()
+        info, path = line.split("=>")
+        path = path.strip()
+        lib = info[0:info.find("(")].strip()
+        alllibs[lib] = path
+
+    for item in addlist:
+        if item in alllibs:
+            add(item,alllibs[item])
+        elif item+".so" in alllibs:
+            add(item,alllibs[item+".so"])
+        elif os.path.isfile(item):
+            add(os.path.basename(item),item)
+
+while not alldone:    
+    alldone = True
+
+    for key in list(depdict):
+        if depdone[key] == True:
+            continue
+
+        liblocation = depdict[key]
+        ldd_run(liblocation)
+        depdone[key] = True
+
+shell("rm -rf tmp_preloadify/")
+shell("mkdir -p tmp_preloadify/lib/")
+shell("mkdir -p tmp_preloadify/bin/")
+
+elf_interpreter = os.path.basename(shell_output("patchelf --print-interpreter "+path_to_original));
+
+for libname in depdict:
+    liblocation = depdict[libname]
+    shell("cp -f "+liblocation+" tmp_preloadify/lib/")
+
+if alphabetic_list:
+    shell("ls tmp_preloadify/lib/ | sort")
+
+if size_list:
+    shell("ls -lSh tmp_preloadify/lib/ | tail -n +2 | awk -v OFS='\t'  '{ print $5 , $9 }'")
+
+if pack:
+    for item in pack:
+        shell("cp -f "+item+" tmp_preloadify/bin")
+        shell("patchelf --set-interpreter "+tmpdir+"/preloadified-ld.so tmp_preloadify/bin/"+os.path.basename(item));
+
+shell("rm -f "+path_to_output)
+
+class Image:
+    def create(self):
+        '' #stub
+
+comp_arg = ""   
+if compression:
+    if "bzip2" in compression:
+        comp_arg = "-j"
+    elif "gzip" in compression:
+        comp_arg = "-z"
+    elif "xz" in compression:
+        comp_arg = "-J"
+
+class TarImage:
+    def __init__(self):
+        _type = "tar"
+
+    def script(self):
+        script = '''#!/bin/sh
+myself=$0
+tmpdir='''+tmpdir+'''
+if [ ! -d "$tmpdir" ]; then
+    tmpdir=/cache
+    if [ ! -d "$tmpdir" ]; then
+        tmpdir=$HOME/tmp/
+        mkdir -p $HOME/tmp/
+    fi
+fi
+RAND=$RANDOM
+if [ -z "$RAND" ]; then
+    RAND=nonrandom
+fi
+subtmpdir=$tmpdir/preloadify_$RAND
+i=0
+while [ -d "$subtmpdir" ]
+do
+    subtmpdir=$tmpdir/preloadify_$RAND_$i
+    i=$(($i+1))
+done
+mkdir $subtmpdir
+dd if=$myself bs=1024 skip=10 2> /dev/null | tar '''+comp_arg+'''  -x -C $subtmpdir
+#tail -c +10241 $myself | tar '''+comp_arg+'''  -x -C $subtmpdir
+'''
+        if chrootify:
+            script += '''
+DIRS=$(ls -d /*/)
+for dir in $DIRS
+do
+        echo $dir
+
+        if [ "$dir" = "lost+found" ]; then
+            continue
+        fi
+
+        substr=lib
+        for s in $dir; do
+            if case ${s} in *"${substr}"*) true;; *) false;; esac; then
+                    test
+            else
+                mkdir -p $subtmpdir/tmp_preloadify/$dir
+                mount -o bind $dir $subtmpdir/tmp_preloadify/$dir
+            fi
+        done
+done
+echo $subtmpdir/tmp_preloadify/
+cd $subtmpdir/tmp_preloadify/
+ln -s lib lib64
+export LD_LIBRARY_PATH=/lib/
+chroot $subtmpdir/tmp_preloadify/ /bin/'''+os.path.basename(path_to_original)+"\n"
+        else:
+            script += '''
+rm -f $tmpdir/preloadified-ld.so
+ln -s $subtmpdir/tmp_preloadify/lib/'''+elf_interpreter+''' $tmpdir/preloadified-ld.so
+chmod 0777 $tmpdir/preloadified-ld.so
+export LD_LIBRARY_PATH=$subtmpdir/tmp_preloadify/lib/
+$subtmpdir/tmp_preloadify/bin/'''+os.path.basename(path_to_original)+''' $@
+if [ -z "$NO_PRELOADIFY_CLEANING" ]; then
+    rm -rf $subtmpdir/
+    rm -f $tmpdir/preloadified-ld.so
+fi
+exit
+
+'''
+        return script
+
+    def write_script(self):
+        f = open("tmp_preloadify_wrapper_script.sh","w")
+        f.write(self.script())
+        f.close()
+
+    def create(self):
+        self.write_script()
+
+        shell("tar "+comp_arg+" -cf tmp_preloadify.tar tmp_preloadify/")
+        shell("dd if=/dev/zero of="+path_to_output+" bs=1024 count=10 status=none")
+        shell("dd if=tmp_preloadify_wrapper_script.sh of="+path_to_output+" conv=notrunc status=none")
+        #size = shell_output("du -d0 tmp_preloadify.tar | sed 's/\s.*$//'")
+        shell("dd if=tmp_preloadify.tar of="+path_to_output+" oflag=append conv=notrunc status=none")
+
+#mounting a loop device would be a lot more elegant compared to extracting a tar file
+#but unfortunately it can usually only be done by root, so it's not a universal option
+class LoopImage:
+    def __init__(self):
+        _type = "loop"
+
+    def create(self):
+        size = shell_output("du -d0 tmp_preloadify | sed 's/\s.*$//'")
+        #reserving 10k for the wrapper
+        size = str(int(size) + 10)
+        tenkbytes = str(10*1024)
+        shell("dd if=/dev/zero of="+path_to_output+" status=none bs=1024 count="+size)
+        shell("losetup -o "+tenkbytes+" /dev/loop0 "+path_to_output)
+
+image = TarImage()
+image.create()
+
+shell("chmod +x "+path_to_output)
+
+#clean up
+shell("rm -rf tmp_preloadify")
+shell("rm -f tmp_preloadify.tar")
+shell("rm -f tmp_preloadify_wrapper_script.sh")
+
+if run:
+    shell("./"+path_to_output)
+
