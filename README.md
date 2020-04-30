@@ -18,6 +18,12 @@ system with compatible processor architecture, in example all 64bit-x86 Linux sy
 This allows for porting binaries from a full-fledged GNU/Linux to a bare-bones embedded
 Linux system, that has for example BusyBox, or some uncommon libc, or no ld.so at all.
 
+The --pack command line option allows you to pack other binaries into the same final fat binary,
+the kicker here is that for those additional binaries preloadify also searches for needed
+dynamic libraries and packs them into the fat binary, too. This means that the executable you
+wanted to convert into a fat executable can also call those other packed executables at runtime
+and they are also garantueed not to be missing any dynamic library dependencies.
+
 Dependencies:
 - docopt (pip3 install docopt)
 - patchelf
