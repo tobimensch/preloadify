@@ -1,6 +1,11 @@
-- name: Deploy Pypi
-  uses: remorses/pypi@v3
-  with:
-    setupfile: ./setup.py
-    username: ${{ secrets.pypi_username }}
-    password: ${{ secrets.pypi_password }}
+# Trigger the workflow on pull request activity
+on:
+  release:
+    # Only use the types keyword to narrow down the activity types that will trigger your workflow.
+    types: [published, created, edited]
+      - name: Deploy Pypi
+        uses: remorses/pypi@v3
+        with:
+          setupfile: ./setup.py
+          username: ${{ secrets.pypi_username }}
+          password: ${{ secrets.pypi_password }}
