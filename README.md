@@ -15,6 +15,8 @@ and patchelf.
 Preloadify goes so far as to include the ld.so in the created binary (which is a sort of
 self-contained package) in order to make absolutely sure that it will run on every Linux
 system with compatible processor architecture, in example all 64bit-x86 Linux systems.
+This allows for porting binaries from a full-fledged GNU/Linux to a bare-bones embedded
+Linux system, that has for example BusyBox, or some uncommon libc, or no ld.so at all.
 
 Dependencies:
 - docopt (pip3 install docopt)
