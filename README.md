@@ -33,7 +33,7 @@ The help output (preloadify --help) should be sufficient to understand how it wo
 ```
 Usage: preloadify [options] EXECUTABLE OUTPUTFILE
 
-Create an executable self-containing all dynamic library depedencies of the original.
+Create an executable self-containing all dynamic library dependencies of the original.
 
 Options:
   -l, --list                  Alphabetically sorted list of all dynamic libraries
