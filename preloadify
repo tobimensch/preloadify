@@ -42,7 +42,7 @@ __version__ = '0.1.0'
 doc ='''
 Usage: preloadify [options] EXECUTABLE OUTPUTFILE
 
-Create an executable self-containing all dynamic library depedencies of the original.
+Create an executable self-containing all dynamic library dependencies of the original.
 
 Options:
   -l, --list                  Alphabetically sorted list of all dynamic libraries
