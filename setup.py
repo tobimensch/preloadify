@@ -8,5 +8,7 @@ setup(name='preloadify',
       description='Create fat binaries with ease.',
       author='Tobias Glaesser',
       url='https://github.com/tobimensch/preloadify/',
-      scripts=['preloadify']
+      scripts=['preloadify'],
+      packages=['preloadify'],
+      install_requires=['docopt']
      )
