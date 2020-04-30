@@ -10,5 +10,6 @@ setup(name='preloadify',
       url='https://github.com/tobimensch/preloadify/',
       scripts=['preloadify'],
       packages=['preloadify'],
-      install_requires=['docopt']
+      install_requires=['docopt'],
+      license='MIT'
      )
