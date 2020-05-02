@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Create fat binaries with ease"""
 
 # Preloadify is MIT licensed.
 # Please see https://opensource.org/licenses/MIT
@@ -68,6 +69,9 @@ Options:
                                   libsomelib
                                   libsomeotherlib
                                   /path/to/lib
+  --strace TIMEOUT            Use the tool strace to find out which libraries get
+                              dynamically loaded by the executable and add those
+                              libraries to the preloadified executable.
   -c, --compression METHOD    One of gzip, bzip2 and xz.
                               By default compression is disabled.
                               Note that compression can influence portability negatively.
@@ -98,9 +102,11 @@ blacklist = None
 compression = None
 run = False
 addlist = None
+strace = 0
 chrootify = False
 pack = None
 tmpdir = "/tmp"
+interpreter_offsets = ""
 
 if opt["EXECUTABLE"]:
     path_to_original = opt["EXECUTABLE"]
@@ -128,6 +134,8 @@ if opt["--addlist"]:
     for line in tmp:
         addlist.append(line.strip())
     f.close()
+if opt["--strace"]:
+    strace = opt["--strace"]
 if opt["--chrootify"]:
     chrootify = True
 if opt["--tmpdir"]:
@@ -154,11 +162,11 @@ depdone = {}
 alldone = False
 
 def add(libname,libpath):
-    depdict[libname] = libpath
-    if libname not in depdone:
-        depdone[libname] = False
-        alldone = False
-
+    if libname not in depdict:
+        depdict[libname] = libpath
+        if libname not in depdone:
+            depdone[libname] = False
+            alldone = False
 
 def ldd_run(filename,ret=True):
     p = subprocess.Popen(["ldd",filename], stdout=subprocess.PIPE)
@@ -218,7 +226,28 @@ if addlist:
         elif item+".so" in alllibs:
             add(item,alllibs[item+".so"])
         elif os.path.isfile(item):
-            add(os.path.basename(item),item)
+            add(os.path.basename(item), item)
+
+if strace != 0:
+  cmd = "timeout " + strace + " strace -o straceout -e file " + path_to_original
+  print("preloadify: " + cmd)
+  output = shell(cmd)
+  print("preloadify: strace done")
+  counter = 0
+  with open('straceout') as f:
+    lines = f.readlines()
+    for line in lines:
+      if line.startswith('openat(AT_FDCWD') and ('.so.' in line or '.so"' in line):
+        if 'ld.so.cache' in line:
+          continue
+        if line.strip().endswith('= 3'):
+          prefix = 'openat(AT_FDCWD, "'
+          line = line[len(prefix):]
+          line = line[:line.find('"')]
+          print(line)
+          add(os.path.basename(line), line)
+          counter += 1
+    print(counter)
 
 while not alldone:    
     alldone = True
@@ -247,10 +276,16 @@ if alphabetic_list:
 if size_list:
     shell("ls -lSh tmp_preloadify/lib/ | tail -n +2 | awk -v OFS='\t'  '{ print $5 , $9 }'")
 
+interpreter_trick_text = '///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////'
+
 if pack:
     for item in pack:
         shell("cp -f "+item+" tmp_preloadify/bin")
-        shell("patchelf --set-interpreter "+tmpdir+"/preloadified-ld.so tmp_preloadify/bin/"+os.path.basename(item));
+        my_interpreter_short = tmpdir + "/preloadified-ld.so"
+        my_interpreter = interpreter_trick_text[:-(len(my_interpreter_short))] + my_interpreter_short
+        shell("patchelf --set-interpreter \""+ my_interpreter +"\" tmp_preloadify/bin/"+os.path.basename(item));
+        my_interpreter_offset = shell_output("grep --only --byte-offset -a \""+ my_interpreter +"\" tmp_preloadify/bin/"+os.path.basename(item)+ " | sed s/:.*//")
+        interpreter_offsets += "tmp_preloadify/bin/"+os.path.basename(item)+" "+ my_interpreter_offset
 
 shell("rm -f "+path_to_output)
 
@@ -275,13 +310,50 @@ class TarImage:
         script = '''#!/bin/sh
 myself=$0
 tmpdir='''+tmpdir+'''
-if [ ! -d "$tmpdir" ]; then
-    tmpdir=/cache
-    if [ ! -d "$tmpdir" ]; then
-        tmpdir=$HOME/tmp/
-        mkdir -p $HOME/tmp/
+# string with binary interpreter offsets
+INTERPRETER_OFFSETS="'''+interpreter_offsets+'''"
+# end of string
+antipatchelf=
+if [ "$1" == "--preloadify-tmpdir" ]; then
+    if [ "$2" != "" ]; then
+        path="$2"
+        if ! [ "${path%"${path#/}"}" ]; then
+            path=`pwd`/"$path"
+        fi
+        #debug echo "path: $path"
+        tmpdir="$path"
+        mkdir -p "$tmpdir"
+        antipatchelf=1
+        shift
+        shift
     fi
 fi
+if [ ! -d "$tmpdir" ]; then
+    mkdir -p "$tmpdir"
+    touch "$tmpdir"/"touchtest" && rm -f "$tmpdir"/"touchtest"
+    if [ "$?" -ne 0 ]; then
+        tmpdir=/cache
+        mkdir -p "$tmpdir"
+        touch "$tmpdir"/"touchtest" && rm -f "$tmpdir"/"touchtest"
+        if [ "$?" -ne 0 ]; then
+            tmpdir=$HOME/.local/share/preloadify_tmp/
+            mkdir -p "$tmpdir"
+            touch "$tmpdir"/"touchtest" && rm -f "$tmpdir"/"touchtest"
+            if [ "$?" -ne 0 ]; then
+                echo "Couldn't find suitable temp directory for extracting preloadified package."
+                echo "Use --preloadify-tmp DIRECTORY to provide a suitable directory path."
+                exit 1
+            fi
+        fi
+    fi
+    # antipatchelf - my hacky patchelf
+    antipatchelf=1
+fi
+if ! [ "${tmpdir%"${tmpdir#/}"}" ]; then
+    tmpdir=`pwd`/"$tmpdir"
+fi
+
+#debug echo "TMPDIR: $tmpdir"
 RAND=$RANDOM
 if [ -z "$RAND" ]; then
     RAND=nonrandom
@@ -302,9 +374,49 @@ dd if=$myself bs=1024 skip=10 2> /dev/null | tar '''+comp_arg+'''  -x -C $subtmp
 DIRS=$(ls -d /*/)
 for dir in $DIRS
 do
-        echo $dir
+        #debug echo $dir
 
-        if [ "$dir" = "lost+found" ]; then
+        if [ "$dir" = "/lost+found/" ]; then
+            continue
+        fi
+        if [ "$dir" = "/bin/" ]; then
+            continue
+        fi
+        if [ "$dir" = "/sbin/" ]; then
+            continue
+        fi
+        if [ "$dir" = "/tmp/" ]; then
+            mkdir -p $subtmpdir/tmp_preloadify/$dir
+            continue
+        fi
+        if [ "$dir" = "/usr/" ]; then
+            mkdir -p $subtmpdir/tmp_preloadify/$dir
+            USRDIRS=$(ls -d /usr/*/)
+            for usrdir in $USRDIRS
+            do
+              if [ "$usrdir" = "/usr/local/" ]; then
+                  continue
+              fi
+              if [ "$usrdir" = "/usr/bin/" ]; then
+                  continue
+              fi
+              if [ "$usrdir" = "/usr/sbin/" ]; then
+                  continue
+              fi
+              substr=lib
+              for s in $usrdir; do
+                  if case ${s} in *"${substr}"*) true;; *) false;; esac; then
+                      test
+                  else
+                      mkdir -p $subtmpdir/tmp_preloadify/$usrdir
+                      mount -o bind $usrdir $subtmpdir/tmp_preloadify/$usrdir
+                      mount -o bind,remount,ro $subtmpdir/tmp_preloadify/$usrdir
+                      if [ $? -ne 0 ]; then
+                          umount $subtmpdir/tmp_preloadify/$usrdir
+                      fi
+                  fi
+              done
+            done
             continue
         fi
 
@@ -315,24 +427,67 @@ do
             else
                 mkdir -p $subtmpdir/tmp_preloadify/$dir
                 mount -o bind $dir $subtmpdir/tmp_preloadify/$dir
+                mount -o bind,remount,ro $subtmpdir/tmp_preloadify/$dir
+                if [ $? -ne 0 ]; then
+                    umount $subtmpdir/tmp_preloadify/$dir
+                fi
             fi
         done
 done
-echo $subtmpdir/tmp_preloadify/
+#debug echo $subtmpdir/tmp_preloadify/
 cd $subtmpdir/tmp_preloadify/
 ln -s lib lib64
 export LD_LIBRARY_PATH=/lib/
-chroot $subtmpdir/tmp_preloadify/ /bin/'''+os.path.basename(path_to_original)+"\n"
+chroot $subtmpdir/tmp_preloadify/ /bin/'''+os.path.basename(path_to_original)+"\n" #end of chroot part
         else:
             script += '''
-rm -f $tmpdir/preloadified-ld.so
-ln -s $subtmpdir/tmp_preloadify/lib/'''+elf_interpreter+''' $tmpdir/preloadified-ld.so
-chmod 0777 $tmpdir/preloadified-ld.so
+PRPATH=$tmpdir/preloadified-ld.so
+rm -f "$PRPATH"
+ln -s $subtmpdir/tmp_preloadify/lib/'''+elf_interpreter+''' "$PRPATH"
+chmod 0777 "$PRPATH"
+PRPATHLEN=`echo "$PRPATH" | wc -m`
 export LD_LIBRARY_PATH=$subtmpdir/tmp_preloadify/lib/
+#debug echo "beforeantipatch"
+#debug tree testmoe
+if [ "$antipatchelf" != "" ]; then # no change needed for the default tmpdir
+    #debug echo "antipatch"
+    NEXT_IS_NUM=0
+    CURRENT_BIN=
+    INTERPRETER_TRICK="///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////"
+    INTERPRETER_TRICK_LEN=668
+    #debug echo $INTERPRETER_OFFSETS
+    #debug echo $subtmpdir
+    for part in $INTERPRETER_OFFSETS; do
+        #debug echo "PART:" $part
+        if [ "$NEXT_IS_NUM" -ne 0 ]; then
+            #debug echo "is_num"
+            NEXT_IS_NUM=0
+            OFFSET=$part
+            #debug echo $OFFSET
+            OFFSET2=`expr "$OFFSET" + "$INTERPRETER_TRICK_LEN" - "$PRPATHLEN"`
+            #debug echo $OFFSET2
+            echo -n "$INTERPRETER_TRICK" | dd of="$CURRENT_BIN" bs=1 seek=$OFFSET conv=notrunc 2> /dev/null
+            echo -n "$PRPATH" | dd of="$CURRENT_BIN" bs=1 seek=$OFFSET2 conv=notrunc 2> /dev/null
+        fi
+        if [ -e "$subtmpdir/$part" ]; then
+            #debug echo "is_not_num"
+            NEXT_IS_NUM=1
+            CURRENT_BIN="$subtmpdir/$part"
+            continue
+        fi
+    done
+fi
+#exit
+#debug echo "afterantipatch"
 $subtmpdir/tmp_preloadify/bin/'''+os.path.basename(path_to_original)+''' $@
+#debug echo "afterrun"
 if [ -z "$NO_PRELOADIFY_CLEANING" ]; then
     rm -rf $subtmpdir/
-    rm -f $tmpdir/preloadified-ld.so
+    rm -f "$PRPATH"
+    if    ls -1qA "$tmpdir" | grep -q .
+    then  ! test # not empty
+    else  rm -fd "$tmpdir"
+    fi
 fi
 exit
 
