@@ -7,25 +7,25 @@
 # Please be a good open source citizen and contribute
 # changes back to https://github.com/tobimensch/preloadify
 
-#1.
-#ldd on main executable
-#recurvise ldd on all libraries
-#save table/list of all required libraries
+# 1.
+# ldd on main executable
+# recurvise ldd on all libraries
+# save table/list of all required libraries
 
-#2. copy all required libraries into folder lib/
+# 2. copy all required libraries into folder lib/
 
-#3. create tarball with:
-#- original main executable (unchanged)
-# - (use patchelf to change interpreter location)
-#- lib/ folder with all dependencies
+# 3. create tarball with:
+# - original main executable (unchanged)
+#  - (use patchelf to change interpreter location)
+# - lib/ folder with all dependencies
 
-#4. create wrapper shell script that
-#- contains script portion
-#- contains tarball portion
-#- is executable
-#- script portion finds tarball portion, extracts it and calls the executable
-#- script portion cleans up temporary execution environment (ie. removes tmp files) when
-#  executable returns
+# 4. create wrapper shell script that
+# - contains script portion
+# - contains tarball portion
+# - is executable
+# - script portion finds tarball portion, extracts it and calls the executable
+# - script portion cleans up temporary execution environment (ie. removes tmp files) when
+#   executable returns
 
 import subprocess
 import os
@@ -39,7 +39,32 @@ def shell(s,suppress_output=False):
         subprocess.call(s, shell=True)
 
 def shell_output(command):
-    return subprocess.check_output(command, stderr=subprocess.STDOUT, shell=True).decode('utf-8').strip()
+    try:
+        output = subprocess.check_output(command, stderr=subprocess.STDOUT, shell=True).decode('utf-8').strip()
+        return output
+    except subprocess.CalledProcessError as e:
+        return e.output.decode('utf-8')
+
+def needExecutable(execName):
+    execPath = shell_output("whereis -b " + execName + " | cut -d ' ' -f2")
+    if execPath == "":
+        print("'" + execName + "' is needed, but wasn't found in your system's PATH.")
+        print("To continue please make sure '" + execName + "' is installed.")
+        exit(1)
+    return execPath
+
+class termcolor:
+    NONE = '\033[0m'
+    GREEN = '\033[92m'
+    BEWARE = '\033[93m'
+    NOGOOD = '\033[91m'
+    BOLDFONT = '\033[1m'
+    ULINEFONT = '\033[4m'
+    NAMING = '\033[95m'
+    BLUE = '\033[94m'
+
+def printStageStart(s, more = ""):
+    print(termcolor.GREEN + '[' + s + ']' + termcolor.NONE + ' ' + more)
 
 from docopt import docopt
 
@@ -78,6 +103,7 @@ Options:
   -t, --tmpdir TMPDIR         Set a different tmp directory. Default is /tmp.
   -r, --run                   Run preloadified executable as soon as it is created.
                               (For testing purposes)
+  --bubblewrap                Create a bubblewrap container for the executable.
   --chrootify                 With this option the wrapper creates a chroot environment
                               for the executable emulating the system without its libraries.
                               This can be useful to test whether all library dependencies
@@ -87,6 +113,11 @@ Options:
                               i.e. --pack bash,/path/to/program
                               Note that only the main executable will be executed
                               when executing the generated outputfile.
+  --quiet                     Don't print anything to the console,
+                              unless there are errors.
+  --shellcheck                This debug option checks the generated starter
+                              shell script for errors. You need to have ShellCheck
+                              installed for this option to work.
   -h, --help                  Show this help message and exit
   -v, --version               Display version information
 
@@ -102,8 +133,11 @@ blacklist = None
 compression = None
 run = False
 addlist = None
+verbose = True
 strace = 0
+bubblewrap = False
 chrootify = False
+shellcheck = False
 pack = None
 tmpdir = "/tmp"
 interpreter_offsets = ""
@@ -136,10 +170,20 @@ if opt["--addlist"]:
     f.close()
 if opt["--strace"]:
     strace = opt["--strace"]
+    needExecutable('strace')
+if opt["--bubblewrap"]:
+    bubblewrap = True
 if opt["--chrootify"]:
     chrootify = True
+if opt["--shellcheck"]:
+    shellcheck = True
+    needExecutable('shellcheck')
+if opt["--quiet"]:
+    verbose = False
 if opt["--tmpdir"]:
     tmpdir = opt["--tmpdir"]
+
+needExecutable('patchelf')
 
 pack = []
 if opt["--pack"]:
@@ -163,6 +207,8 @@ alldone = False
 
 def add(libname,libpath):
     if libname not in depdict:
+        if verbose:
+            print("Add library: " + libname + " from " + libpath)
         depdict[libname] = libpath
         if libname not in depdone:
             depdone[libname] = False
@@ -205,7 +251,12 @@ def ldd_run(filename,ret=True):
 
 pack.append(path_to_original)
 
+if bubblewrap:
+    pack.append(needExecutable('bwrap'))
+
 if pack:
+    if verbose:
+        printStageStart("Find library dependencies using ldd recursively")
     for item in pack:
         ldd_run(item)
 
@@ -230,10 +281,10 @@ if addlist:
 
 if strace != 0:
   cmd = "timeout " + strace + " strace -o straceout -e file " + path_to_original
-  print("preloadify: " + cmd)
+  if verbose:
+      printStageStart("Find library dependencies using strace", " timeout: " + strace)
   output = shell(cmd)
-  print("preloadify: strace done")
-  counter = 0
+  #print("preloadify: strace done")
   with open('straceout') as f:
     lines = f.readlines()
     for line in lines:
@@ -244,10 +295,7 @@ if strace != 0:
           prefix = 'openat(AT_FDCWD, "'
           line = line[len(prefix):]
           line = line[:line.find('"')]
-          print(line)
           add(os.path.basename(line), line)
-          counter += 1
-    print(counter)
 
 while not alldone:    
     alldone = True
@@ -309,12 +357,17 @@ class TarImage:
     def script(self):
         script = '''#!/bin/sh
 myself=$0
+exec_basename='''+os.path.basename(path_to_original)+'''
 tmpdir='''+tmpdir+'''
 # string with binary interpreter offsets
 INTERPRETER_OFFSETS="'''+interpreter_offsets+'''"
 # end of string
 antipatchelf=
-if [ "$1" == "--preloadify-tmpdir" ]; then
+if [ "$1" = "--preloadify-contents" ]; then
+    dd if="$myself" bs=1024 skip=10 2> /dev/null | tar '''+comp_arg+''' -vt
+    exit
+fi
+if [ "$1" = "--preloadify-tmpdir" ]; then
     if [ "$2" != "" ]; then
         path="$2"
         if ! [ "${path%"${path#/}"}" ]; then
@@ -330,15 +383,15 @@ if [ "$1" == "--preloadify-tmpdir" ]; then
 fi
 if [ ! -d "$tmpdir" ]; then
     mkdir -p "$tmpdir"
-    touch "$tmpdir"/"touchtest" && rm -f "$tmpdir"/"touchtest"
+    touch "$tmpdir""/touchtest" && rm -f "$tmpdir""/touchtest"
     if [ "$?" -ne 0 ]; then
         tmpdir=/cache
         mkdir -p "$tmpdir"
-        touch "$tmpdir"/"touchtest" && rm -f "$tmpdir"/"touchtest"
+        touch "$tmpdir""/touchtest" && rm -f "$tmpdir""/touchtest"
         if [ "$?" -ne 0 ]; then
             tmpdir=$HOME/.local/share/preloadify_tmp/
             mkdir -p "$tmpdir"
-            touch "$tmpdir"/"touchtest" && rm -f "$tmpdir"/"touchtest"
+            touch "$tmpdir""/touchtest" && rm -f "$tmpdir""/touchtest"
             if [ "$?" -ne 0 ]; then
                 echo "Couldn't find suitable temp directory for extracting preloadified package."
                 echo "Use --preloadify-tmp DIRECTORY to provide a suitable directory path."
@@ -362,11 +415,11 @@ subtmpdir=$tmpdir/preloadify_$RAND
 i=0
 while [ -d "$subtmpdir" ]
 do
-    subtmpdir=$tmpdir/preloadify_$RAND_$i
-    i=$(($i+1))
+    subtmpdir="$tmpdir"/preloadify_"$RAND"_"$i"
+    i=`expr "$i" + 1`
 done
-mkdir $subtmpdir
-dd if=$myself bs=1024 skip=10 2> /dev/null | tar '''+comp_arg+'''  -x -C $subtmpdir
+mkdir "$subtmpdir"
+dd if="$myself" bs=1024 skip=10 2> /dev/null | tar '''+comp_arg+'''  -x -C "$subtmpdir"
 #tail -c +10241 $myself | tar '''+comp_arg+'''  -x -C $subtmpdir
 '''
         if chrootify:
@@ -438,7 +491,11 @@ done
 cd $subtmpdir/tmp_preloadify/
 ln -s lib lib64
 export LD_LIBRARY_PATH=/lib/
-chroot $subtmpdir/tmp_preloadify/ /bin/'''+os.path.basename(path_to_original)+"\n" #end of chroot part
+chroot $subtmpdir/tmp_preloadify/ "/bin/$exec_basename"''' #end of chroot part
+        elif bubblewrap:
+            script += '''
+$subtmpdir/tmp_preloadify/bwrap params "$exec_basename"
+'''
         else:
             script += '''
 PRPATH=$tmpdir/preloadified-ld.so
@@ -479,7 +536,7 @@ if [ "$antipatchelf" != "" ]; then # no change needed for the default tmpdir
 fi
 #exit
 #debug echo "afterantipatch"
-$subtmpdir/tmp_preloadify/bin/'''+os.path.basename(path_to_original)+''' $@
+"$subtmpdir/tmp_preloadify/bin/$exec_basename" $@
 #debug echo "afterrun"
 if [ -z "$NO_PRELOADIFY_CLEANING" ]; then
     rm -rf $subtmpdir/
@@ -498,6 +555,13 @@ exit
         f = open("tmp_preloadify_wrapper_script.sh","w")
         f.write(self.script())
         f.close()
+        if shellcheck:
+            printStageStart("Check wrapper script for issues with ShellCheck")
+            output = shell_output("shellcheck -s sh -S info tmp_preloadify_wrapper_script.sh")
+            print(output)
+            if output.find('error'):
+                print("Error: ShellCheck found an issue in the wrapper script!")
+                exit(1)
 
     def create(self):
         self.write_script()
