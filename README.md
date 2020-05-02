@@ -24,6 +24,11 @@ dynamic libraries and packs them into the fat binary, too. This means that the e
 wanted to convert into a fat executable can also call those other packed executables at runtime
 and they are also garantueed not to be missing any dynamic library dependencies.
 
+Install with pypi:
+```
+pip3 install preloadify
+```
+
 Dependencies:
 - docopt (pip3 install docopt)
 - patchelf
